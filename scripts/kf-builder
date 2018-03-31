@@ -1,7 +1,8 @@
 #!/bin/bash
-KF=github.com/kkasravi/kf
+KF=github.com/kkasravi/kf/kf
+rm -rf $GOPATH/src/$KF
+mkdir $GOPATH/src/$KF
 
-rm -rf $GOPATH/src/$KF/*
 cobra init $KF
 cd $GOPATH/src/$KF
 cobra add create
@@ -9,13 +10,18 @@ cobra add delete
 cobra add exec
 cobra add logs
 cobra add remove
+cobra add services
+cobra add list -p 'servicesCmd'
+cobra add health -p 'servicesCmd'
+cobra add stats -p 'servicesCmd'
 cobra add shell
 cobra add use
 cobra add whoami
 cobra add user
 cobra add add -p 'userCmd' 
 cobra add rm -p 'userCmd' 
-cobra add list -p 'userCmd'
-cobra add import
-cobra add pkg -p 'importCmd'
-cobra add command -p 'importCmd'
+cobra add ls -p 'userCmd'
+cobra add command
+cd -
+mv $GOPATH/src/$KF/* .
+rmdir $GOPATH/src/$KF

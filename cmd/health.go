@@ -20,9 +20,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// commandCmd represents the command command
-var commandCmd = &cobra.Command{
-	Use:   "command",
+// healthCmd represents the health command
+var healthCmd = &cobra.Command{
+	Use:   "health",
 	Short: "A brief description of your command",
 	Long: `A longer description that spans multiple lines and likely contains examples
 and usage of using your command. For example:
@@ -31,20 +31,20 @@ Cobra is a CLI library for Go that empowers applications.
 This application is a tool to generate the needed files
 to quickly create a Cobra application.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("command called")
+		fmt.Println("health called")
 	},
 }
 
 func init() {
-	rootCmd.AddCommand(commandCmd)
+	servicesCmd.AddCommand(healthCmd)
 
 	// Here you will define your flags and configuration settings.
 
 	// Cobra supports Persistent Flags which will work for this command
 	// and all subcommands, e.g.:
-	// commandCmd.PersistentFlags().String("foo", "", "A help for foo")
+	// healthCmd.PersistentFlags().String("foo", "", "A help for foo")
 
 	// Cobra supports local flags which will only run when this command
 	// is called directly, e.g.:
-	// commandCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+	// healthCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
 }
