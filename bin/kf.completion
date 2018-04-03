@@ -1,0 +1,257 @@
+_kfglobaloptions=""
+_kfoptions()
+{
+  local alloptions="-h -v -V" calculated="" current
+  case "$#" in 
+    0)
+      _kfglobaloptions=$alloptions
+      ;;
+    1)
+      current="$1" 
+      read -r -a options <<< "$alloptions"
+      for i in "${options[@]}"; do
+        [[ "$_kfglobaloptions" =~ "$i" ]]
+        if [ "$?" == "0" ]; then
+          if [ "$i" != "$current" ]; then
+            calculated=${i}" "${calculated}
+          fi
+        fi
+      done
+      _kfglobaloptions="$calculated"
+      ;;
+    *)
+      ;;
+  esac
+}
+
+_kfargs()
+{
+  local cur component containers command
+  prev="$1"
+  component=$(eval _iscomponent $prev)
+  if [ -n "$component" ]; then
+    command=$(eval '[[ "${COMP_WORDS[COMP_CWORD-2]}" =~ ^- ]] && echo "${COMP_WORDS[COMP_CWORD-3]}" || echo "${COMP_WORDS[COMP_CWORD-2]}"')
+    case "$command" in 
+      exec)
+        containers="$(kubectl get pods -lapp=$component -ojsonpath='{.items[*].spec.containers[*].name}')"
+        if [ -n "$containers" -a "$containers" != "$component" ]; then
+          COMPREPLY=( $(compgen -W "${containers}" -- ${prev}) )
+        fi
+        ;;
+      *)
+        ;;
+    esac
+  fi
+}
+
+_getcomponents()
+{
+  echo ${COMPONENTS:-'[helium-web|helium|helium-celery|helium-proxy|helium-web|ncloud-test|ncs|nervana-ingress|opentracing]'} | sed 's/^\[\(.*\)\]$/\1/' | tr '|' ' '
+}
+
+_iscomponent()
+{
+  local component="$1" components=$(eval _getcomponents)
+  for i in $(echo $components | tr ' ' '\n'); do
+    if [ "$i" == "$component" ]; then
+      echo $i
+      break;
+    fi
+  done
+}
+
+_kf()
+{
+  local cur prev commands components=$(eval _getcomponents)
+  COMPREPLY=()
+  cur="${COMP_WORDS[COMP_CWORD]}"
+  prev="${COMP_WORDS[COMP_CWORD-1]}"
+
+  commands="create debug delete deploy exec jobs logs notebook redeploy remove serve shell show status train user whoami"
+  case "${prev}" in
+    create)
+      local options="-h -d -r -b -i"
+      COMPREPLY=( $(compgen -W "${options}" -- ${cur}) )
+      return 0
+      ;;
+    debug)
+      local options="-h -b -bn -t"
+      COMPREPLY=( $(compgen -W "${options} ${components}" -- ${cur}) )
+      return 0
+      ;;
+    delete)
+      local options="-h"
+      local ns=$(kubectl get ns -oname|awk -F/ '{print $2}')
+      COMPREPLY=( $(compgen -W "${options} ${ns}" -- ${cur}) )
+      return 0
+      ;;
+    deploy)
+      local options="-h -d -t"
+      COMPREPLY=( $(compgen -W "${options} ${components}" -- ${cur}) )
+      return 0
+      ;;
+    exec)
+      local options="-h"
+      COMPREPLY=( $(compgen -W "${options} ${components}" -- ${cur}) )
+      return 0
+      ;;
+    jobs)
+      local options="-h"
+      COMPREPLY=( $(compgen -W "${options} ${components}" -- ${cur}) )
+      return 0
+      ;;
+    logs)
+      local options="-h -f"
+      COMPREPLY=( $(compgen -W "${options} ${components}" -- ${cur}) )
+      return 0
+      ;;
+    notebook)
+      local options="-h"
+      COMPREPLY=( $(compgen -W "${options}" -- ${cur}) )
+      return 0
+      ;;
+    redeploy)
+      local options="-h -d -t"
+      COMPREPLY=( $(compgen -W "${options} ${components}" -- ${cur}) )
+      return 0
+      ;;
+    remove)
+      local options="-h"
+      COMPREPLY=( $(compgen -W "${options} ${components}" -- ${cur}) )
+      return 0
+      ;;
+    serve)
+      local options="-h"
+      COMPREPLY=( $(compgen -W "${options}" -- ${cur}) )
+      return 0
+      ;;
+    status)
+      local options="-h"
+      COMPREPLY=( $(compgen -W "${options} ${components}" -- ${cur}) )
+      return 0
+      ;;
+    shell)
+      local options="-h -s"
+      COMPREPLY=( $(compgen -W "${options} ${components}" -- ${cur}) )
+      return 0
+      ;;
+    show)
+      local options="-h" envs=$(cd $HOME/$(kf whoami) && ks env list | tail +3 | awk '{print $1}')
+      COMPREPLY=( $(compgen -W "${options} ${envs}" -- ${cur}) )
+      return 0
+      ;;
+    train)
+      local options="-h"
+      COMPREPLY=( $(compgen -W "${options}" -- ${cur}) )
+      return 0
+      ;;
+    user)
+      local options="-h -a --add -d --delete"
+      COMPREPLY=( $(compgen -W "${options}" -- ${cur}) )
+      return 0
+      ;;
+    -h)
+      local base=${COMP_WORDS[COMP_CWORD-2]}
+      case "${base}" in
+        create)
+          return 0
+          ;;
+        debug)
+          return 0
+          ;;
+        delete)
+          return 0
+          ;;
+        deploy)
+          return 0
+          ;;
+        exec)
+          return 0
+          ;;
+        jobs)
+          return 0
+          ;;
+        logs)
+          return 0
+          ;;
+        notebook)
+          return 0
+          ;;
+        redeploy)
+          return 0
+          ;;
+        remove)
+          return 0
+          ;;
+        serve)
+          return 0
+          ;;
+        shell)
+          return 0
+          ;;
+        show)
+          return 0
+          ;;
+        status)
+          return 0
+          ;;
+        train)
+          return 0
+          ;;
+        user)
+          return 0
+          ;;
+        whoami)
+          return 0
+          ;;
+      esac
+      ;;
+    -f)
+      COMPREPLY=( $(compgen -W "${components}" -- ${cur}) )
+      return 0
+      ;;
+    -V)
+      _kfoptions -V
+      COMPREPLY=( $(compgen -W "${_kfglobaloptions} ${commands}" -- ${cur}) )
+      return 0
+      ;;
+    -v)
+      _kfoptions -v
+      COMPREPLY=( $(compgen -W "${_kfglobaloptions} ${commands}" -- ${cur}) )
+      return 0
+      ;;
+    -b | -bn | -t)
+      return 0
+      ;;
+    -d)
+      COMPREPLY=( $(compgen -W "${components} " -- ${cur}) )
+      return 0
+      ;;
+    -h)
+      local base=${COMP_WORDS[COMP_CWORD-2]}
+      case "${base}" in
+        show)
+          COMPREPLY=( $(compgen -W "bash sh zsh" -- ${cur}) )
+          return 0
+          ;;
+      esac
+      return 0
+      ;;
+    kf)
+      _kfglobaloptions="-h -v -V"
+      COMPREPLY=( $(compgen -W "${_kfglobaloptions} ${commands}" -- ${cur}) )
+      return 0
+      ;;
+    --)
+      return 0
+      ;;
+    *)
+      _kfargs "${prev}"
+      return 0
+      ;;
+  esac
+  COMPREPLY=($(compgen -W "${_kfglobaloptions} ${commands}" -- ${cur}))  
+  return 0
+}
+complete -F _kf kf
+

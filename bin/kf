@@ -1,0 +1,1031 @@
+#!/bin/bash
+
+version="k8-1.0"
+dev_user=$(kubectl config get-contexts | grep '*' | awk '{print $NF}')
+KINDS="all"
+COMPONENTS=${COMPONENTS:-'[ambassador tf-hub argo-ui tf-job-operator]'}
+portforwardcommand=""
+loopback=192.168.100.105
+verbose=false
+trap cleanup EXIT
+
+usage () 
+{
+  echo -e "Usage: $0 [OPTIONS] COMMANDS\n"\
+  'OPTIONS:\n'\
+  '  -h       | --help       \n'\
+  '  -v       | --version    \n'\
+  '  -V       | --verbose\n'\
+  'COMMANDS:\n'\
+  '  create   [-h] [-d] [-r repo] [-b branch] [-i] namespace\n'\
+  '  delete   [-h] namespace\n'\
+  '  exec     [-h] [component] [container] -- [command]\n'\
+  '  jobs     [-h] [-p port]\n'\
+  '  logs     [-h] [component] [container]\n'\
+  '  notebook [-h] [-p port]\n'\
+  '  serve    [-h] modelname\n'\
+  '  shell    [-h] [component]\n'\
+  '  show     [-h] [component]\n'\
+  '  status   [-h] [component]\n'\
+  '  train    [-h] [-i image] jobname\n'\
+  '  user     [-h] [-a --add][-d --delete] username\n'\
+  '  whoami   [-h]\n'\
+  '\n'\
+  'where [component] is one of $COMPONENTS\n'
+}
+
+version () 
+{
+  echo $version
+  exit 0
+}
+
+help () 
+{
+  usage 
+  exit 0
+}
+
+findpod()
+{
+  local cmd="kubectl get pod -lapp=$1 --show-all=false --no-headers -ojson 2>/dev/null | jq -r '.items[] | select(.status.phase == \"Running\") | .metadata.name' | tail -1" running
+  running="$(eval $cmd)"
+  echo "$running"
+}
+
+cleanup()
+{
+  local output=$(ifconfig lo0)
+  if [[ $output =~ $loopback ]]; then
+    cmd="sudo ifconfig lo0 -alias $loopback"
+    ( $verbose && echo $cmd && eval ${cmd}  ) || eval $cmd
+  fi
+  if [ ! -z "$portforwardcommand" ]; then
+    echo killing "$portforwardcommand"
+    pkill -f "$portforwardcommand"
+  fi
+}
+
+pkginstall()
+{
+  local cmd branch=$2 pkg=$1
+  cmd="ks pkg install ${pkg}@${branch}"
+  ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+  if [[ $branch != "master" && $repo != "kubeflow/kubeflow" ]]; then
+    cmd="rm -rf vendor/$pkg"
+    ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+    cmd="ln -sf ${HOME}/kubeflow/$pkg  vendor/$pkg"
+    ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+  fi
+}
+
+enableiap()
+{
+  local project=$(gcloud projects --quiet list|grep -v PROJECT_ID|awk '{print $1}') 
+  local account=kamkasravi@gmail.com cmd env=$1 namespace=$2
+  local fqdn=kamkasravi.com
+  local ipname=$namespace
+  local clientid="336335541993-0s33opggdt4utdcmoaldmp726vkt083k.apps.googleusercontent.com"
+  local clientsecret="0IKlKD4uErgFvAb_qMoejMqL"
+
+  cmd="gcloud compute --project=$project addresses create $ipname --global"
+  ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+  cmd="ks generate cert-manager cert-manager --namespace=$namespace --acmeEmail=$account"
+  ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+  cmd="ks apply -J ksonnet-lib $env -c cert-manager"
+  ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+  cmd="ks generate iap-ingress iap-ingress --ipName=$ipname --namespace=$namespace --hostname=$fqdn --clientID=$clientid --clientSecret=$clientsecret"
+  ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+  cmd="ks apply -J ksonnet-lib $env -c iap-ingress"
+  ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+}
+
+enablejupyterhub()
+{
+  local corename=$1 env=$2 namespace=$3
+  cmd="ks param set $corename jupyterHubAuthenticator iap"
+  ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+  cmd="ks apply -J ksonnet-lib $env -c $corename"
+  ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+  cmd="kubectl delete -n $namespace pods tf-hub-0"
+  ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+}
+
+createcommand()
+{
+  local cmd corename=kubeflow-core dev_debug=false env=cloud iap=false 
+  local namespace grepo repo="kubeflow/kubeflow" branch="master"
+  case "$#" in 
+    0)
+      echo "namespace required"
+      exit 1
+      ;;
+    *)
+      while [[ "$#" -gt "0" && $1 =~ ^- ]]; do
+        case "$1" in
+          -h)
+            echo -e 'kf create [-h] [-d] [-r repo] [-b branch] [-i] namespace\n'\
+            '-h prints help info\n'\
+            '-d launches jupyterHubImage with "bash sleep inf"\n'\
+            '-r use a different github org/repo (default kubeflow/kubeflow)\n'\
+            '-b use a different github branch (default master)\n'\
+            '-i enable iap\n'\
+            '\n'\
+            'Create will create a kubernetes namespace and populate it with functionality to process ml models.'
+            exit 1
+            ;;
+          -d)
+            shift
+            dev_debug=true
+            ;;
+          -i)
+            iap=true
+            shift 1
+            ;;
+          -r)
+            repo=$2
+            shift 2
+            ;;
+          -b)
+            branch=$2
+            shift 2
+            ;;
+          *)
+            echo "unknown argument $1"
+            exit 1
+            ;;
+        esac
+      done
+      ;;
+  esac
+  if [ -d .git ]; then
+    grepo=$(git remote -v|grep ^origin|head -1|sed 's/^.*@github.com:\(.*\).git.*$/\1/')
+    if [ "${grepo#*/}" == "kubeflow" ]; then
+      repo=$grepo
+      branch=$(git branch|grep '^*'|awk '{print $2}')
+    fi
+  fi
+  case "$#" in 
+    0)
+      echo "namespace required"
+      exit 1
+      ;;
+    1)
+      namespace=$1
+      cd $HOME
+      cmd="kubectl create ns $namespace"
+      ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+      cmd="kubectl config set-context $(kubectl config current-context) --namespace=$namespace"
+      ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+      cmd="ks init $namespace --api-spec=version:v1.8.0"
+      ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+      cd $namespace
+      cmd="ks registry add kubeflow github.com/${repo}/tree/${branch}/kubeflow"
+      ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+      cmd="git clone --depth=1 https://github.com/ksonnet/ksonnet-lib.git"
+      ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+      pkginstall kubeflow/core $branch
+      pkginstall kubeflow/argo $branch
+      cmd="ks prototype use io.ksonnet.pkg.argo argo --namespace $namespace --name argo"
+      ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+      cmd="ks generate core $corename --name=$corename  --namespace=$namespace"
+      ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+      cmd="ks env add $env"
+      ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+      cmd="ks param set $corename cloud gke --env=$env"
+      ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+#      if [ "$repo" != "kubeflow/kubeflow" ]; then
+#        cmd="ks param set kubeflow-core ipName "35.197.125.62" --env=$env"
+#        ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+#        cmd="ks param set kubeflow-core jupyterHubAuthenticator "git" --env=$env"
+#        ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+#        cmd="ks param set kubeflow-core tfAmbassadorServiceType "LoadBalancer" --env=$env"
+#        ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+#        cmd="ks param set kubeflow-core jupyterHubImage nervana/jupyterhub:$branch --env=$env"
+#        ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+#        cmd="ks param set kubeflow-core jupyterHubDebug $dev_debug --env=$env"
+#        ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+#      fi
+      cmd="ks apply -J ksonnet-lib cloud -c $corename"
+      ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+      if [[ $iap == true ]]; then
+        enableiap $env $namespace
+        enablejupyterhub $corename $env $namespace
+      fi
+      ;;
+    *)
+      echo "unknown argument"
+      exit 1
+      ;;
+  esac
+}
+
+deletecommand()
+{
+  local globaladdress namespace cmd
+  local project=$(gcloud projects --quiet list|grep -v PROJECT_ID|awk '{print $1}') 
+  case "$#" in 
+    0)
+      echo "namespace required"
+      exit 1
+      ;;
+    *)
+      while [[ "$#" -gt "0" && $1 =~ ^- ]]; do
+        case "$1" in
+          -h)
+            echo -e 'kf delete [-h] namespace\n'\
+            '-h prints help info\n'\
+            '\n'\
+            'Delete will delete a kubernetes namespace and the local namespace directory.'
+            exit 1
+            ;;
+          *)
+            echo "unknown argument $1"
+            exit 1
+            ;;
+        esac
+      done
+      ;;
+  esac
+  case "$#" in 
+    0)
+      echo "namespace required"
+      exit 1
+      ;;
+    1)
+      namespace=$1
+      cmd="kubectl delete ns $namespace"
+      ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+      cd
+      if [ -d $namespace ]; then
+        cmd="rm -rf $namespace"
+        ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+      fi
+      globaladdress=$(gcloud compute --project=$project addresses list --global|grep '^'$namespace | awk '{print $1}')
+      if [[ -n $globaladdress ]]; then
+        cmd="gcloud compute --project=$project addresses delete $namespace --global"
+        ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+      fi
+      ;;
+    *)
+      echo "unknown argument"
+      exit 1
+      ;;
+  esac
+}
+
+getbranch() 
+{
+  local path leaf tag=true
+  case "$#" in 
+    0)
+      branch=false
+      ;;
+    1)
+      path=$PWD
+      leaf=$(basename $path)
+      case "$leaf" in
+        $1)
+          branch=true
+          ;;
+         *)
+           [[ "$PWD" =~ "$1" ]]
+           if [ "$?" == "0" ]; then
+             while [ "$leaf" != "/" -o "$leaf" != "$HOME" ]; do
+               path=$(dirname $path)
+               leaf=$(basename $path)
+               if [ "$leaf" == "/" -o "$leaf" == "$HOME" ]; then
+                 branch=false
+                 break
+               fi
+               if [ "$leaf" == "$1" ]; then
+                 branch=true
+                 break
+               fi
+             done
+           else
+             branch=false
+           fi
+           ;;
+      esac
+      ;;
+    *)
+      branch=false
+      ;;
+  esac
+  if [ "$branch" == "true" ]; then
+    branch=$(cd $path && { git branch|grep '^*'|awk '{print $2}'; })
+  else 
+    branch=master
+  fi
+  echo $branch
+}
+
+execcommand()
+{
+  local containerized_component container="" processargs=true
+  case "$#" in
+    0)
+      echo "missing -- command [args]"
+      exit 1
+      ;;
+    *)
+      while $processargs :
+      do
+        case "$1" in
+          --)
+            if [ -z "$containerized_component" ]; then
+              containerized_component=$(eval defaultto)
+            fi
+            shift 1
+            processargs=false
+            break
+            ;;
+          -h)
+            echo -e 'kf exec [-h] [component] [container] -- [command]\n'\
+            '-h prints help info\n'\
+            'component is one of $COMPONENTS or $(basename $PWD) if not specified\n\n'\
+            'container a container in the pod if more than one exists\n'\
+            'command command and args\n'\
+            '\n'\
+            'exec will run a command in the component with optional arguments. Both should follow the --.\n'\
+            'Example: kf exec helium -- ps ax\n'
+            exit 0
+            ;;
+          *)
+            if [ "$#" -eq "0" ]; then
+              processargs=false
+            elif [ "$1" != "--" ]; then
+              containerized_component=$(eval defaultto $1)
+              shift 1
+              if [ "$1" != "--" ]; then
+                container=" -c "$1
+                shift 1
+              fi
+            fi
+            ;;
+        esac
+      done
+      ;;
+  esac
+  if [ ! -n "$containerized_component" ]; then
+    echo "Could not find pod for component"
+    exit 1
+  fi
+  pod=$(eval findpod $containerized_component)
+  cmd="kubectl exec $pod $container -it --namespace=$dev_user -- $@"
+  ( $verbose && echo $cmd && eval $cmd ) || eval $cmd
+}
+
+logscommand()
+{
+  local containerized_component options="" container="" pod
+  case "$#" in 
+    0)
+      containerized_component=$(eval defaultto $*)
+      if [ "$containerized_component" == "$(basename $PWD)" ]; then
+        container=$containerized_component
+      fi
+      ;;
+    *)
+      while [[ "$#" -gt "0" && $1 =~ ^- ]]; do
+        case "$1" in
+          -h)
+            echo -e 'kf logs [-h] [component] [container]\n'\
+            '-h prints help info\n'\
+            'component is one of $COMPONENTS or $(basename $PWD) if not specified\n\n'\
+            'container a container in the pod if more than one exists\n'\
+            '\n'\
+            'logs will output the logs of the component\n'\
+            'Example: kf logs helium-web\n'
+            exit 0
+            ;;
+          -f)
+            shift
+            options="-f"
+            ;;
+          *)
+            echo "unknown argument $1"
+            exit 1
+            ;;
+        esac
+      done
+      ;;
+  esac
+  case "$#" in
+    0)
+      containerized_component=$(eval defaultto)
+      container=""
+      ;;
+    1)
+      containerized_component=$(eval defaultto $1)
+      container=""
+      shift 1
+      ;;
+    2)
+      containerized_component=$1
+      container=" -c "$2
+      shift 2
+      ;;
+  esac
+  if [ ! -n "$containerized_component" ]; then
+    echo "Could not find pod for ${component}"
+    exit 1
+  fi
+  pod=$(eval findpod $containerized_component)
+  cmd="kubectl logs $options $pod $container --namespace=$dev_user"
+  ( $verbose && echo $cmd && eval $cmd ) || eval $cmd
+}
+
+notebookcommand()
+{
+  local cmd externalip pidrecord pod port=8000 remoteport proxied
+  case "$#" in 
+    *)
+      while [[ "$#" -gt "0" && $1 =~ ^- ]]; do
+        case "$1" in
+          -h)
+            echo -e 'kf notebook [-h] [-p port]\n'\
+            '-h prints help info\n'\
+            '-p port local port\n'\
+            '\n'\
+            'Open a notebook in the browser.'
+            exit 1
+            ;;
+          -p)
+            port=$2
+            shift 2
+            ;;
+          *)
+            echo "unknown argument $1"
+            exit 1
+            ;;
+        esac
+      done
+      ;;
+  esac
+  case "$#" in 
+    0)
+      externalip=$(kubectl get service ambassador -ojsonpath='{..ip}')
+      if [ -n "$externalip" ]; then
+        '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' "http://${externalip}/hub/" --args --incognito
+#        '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' "http://${externalip}/hub/" 
+      else 
+        cmd="kubectl get services --selector='app=tf-hub' -oyaml -ojsonpath='{.items[0].metadata.annotations}' | grep getambassador"
+        proxied=$(eval $cmd)
+        if [ -n "${proxied}" ]; then
+          remoteport=80
+          pod=$(kubectl get pods --selector="service=ambassador" -ojsonpath='{.items[0].metadata.name}')
+        else 
+          remoteport=8000
+          pod=$(kubectl get pods --selector="app=tf-hub" -ojsonpath='{.items[0].metadata.name}')
+        fi
+        pid=$(ps ax|grep port-f|grep ${port}:80|awk '{print $1}')
+        if [ -n "$pid" ]; then
+          echo kill -9 $pid
+          kill -9 $pid
+        fi
+        echo kubectl port-forward $pod ${port}:${remoteport}
+        kubectl port-forward $pod ${port}:${remoteport} >/dev/null 2>&1 &
+        sleep 2
+        open "http://127.0.0.1:${port}/hub/"
+      fi
+      ;;
+    *)
+      echo "unknown argument"
+      exit 1
+      ;;
+  esac
+}
+
+portforward()
+{
+  local pod=$1 from_port=$2 to_port=$3
+  cmd='kubectl port-forward $pod ${from_port}:${to_port} 2>&1>/dev/null &'
+  portforwardcommand="kubectl port-forward $pod ${from_port}:${to_port}"
+  ( $verbose && echo $cmd && eval $cmd ) || eval $cmd
+}
+
+printnamespace()
+{
+  local cmd="kubectl config get-contexts | grep ""'*'"" | awk '{print (NF==5 ? \$NF : ""\" \""")}'"
+  ( $verbose && echo $cmd && eval $cmd ) || eval $cmd
+}
+
+shellcommand()
+{
+  local component container containerized_component=$(eval defaultto $*) pod shell=bash
+  case "$#" in
+    0)
+      ;;
+    *)
+      while [[ "$#" -gt "0" && $1 =~ ^- ]]; do
+        case "$1" in
+          -h)
+            echo -e 'kf shell [-h] [component]\n'\
+            '-h prints help info\n'\
+            '-s shell [bash]\n'\
+            'component is one of $COMPONENTS or $(basename $PWD) if not specified\n\n'\
+            '\n'\
+            'shell will launch a bash shell in the remote container\n'\
+            'Example: kf shell ncs\n'
+            exit 0
+            ;;
+          -s)
+            shell=$2
+            shift 2
+            ;;
+          *)
+            echo "unknown argument $1"
+            exit 1
+            ;;
+        esac
+      done
+      ;;
+  esac
+  case "$#" in
+    1)
+      containerized_component=$(eval defaultto $1)
+      container=""
+      shift 1
+      ;;
+    2)
+      containerized_component=$1
+      container=" -c "$2
+      shift 2
+      ;;
+  esac
+  if [ ! -n "$containerized_component" ]; then
+    echo "Could not find pod for ${component}"
+    exit 1
+  fi
+  pod=$(eval findpod $containerized_component)
+  cmd="kubectl exec $pod $container -it --namespace=$dev_user -- $shell -c \"PS1=${containerized_component}'$ ' $shell --norc\""
+  ( $verbose && echo $cmd && eval $cmd ) || eval $cmd
+}
+
+showcommand()
+{
+  local environment=default
+  case "$#" in
+    0)
+      ;;
+    *)
+      while [[ "$#" -gt "0" && $1 =~ ^- ]]; do
+        case "$1" in
+          -h)
+            echo -e 'kf show [-h] env [default] [component] [component]\n'\
+            '-h prints help info\n'\
+            '-c component\n'\
+            '\n'\
+            'show will output all k8 manifests for a given environment or default\n'\
+            'Example: kf show cloud kubeflow-core\n'
+            exit 0
+            ;;
+          *)
+            echo "unknown argument $1"
+            exit 1
+            ;;
+        esac
+      done
+      ;;
+  esac
+  case "$#" in
+    1)
+      environment=$1
+      shift 1
+      ;;
+    2)
+      component=" -c "$2
+      shift 2
+      ;;
+  esac
+  cmd="cd $HOME/$(kf whoami) && ks show $environment $component"
+  ( $verbose && echo $cmd && eval $cmd ) || eval $cmd
+}
+
+jobscommand()
+{
+  local cmd pod jobs
+  case "$#" in 
+    0)
+      ;;
+    *)
+      while [[ "$#" -gt "0" && $1 =~ ^- ]]; do
+        case "$1" in
+          -h)
+            echo -e 'kf jobs [-h]\n'\
+            '-h prints help info\n'\
+            '\n'\
+            'Open the tfjobs browser.'
+            exit 1
+            ;;
+          *)
+            echo "unknown argument $1"
+            exit 1
+            ;;
+        esac
+      done
+      ;;
+  esac
+  case "$#" in 
+    0)
+      jobs=$(mktemp /tmp/jobs.XXXXXX) || exit 1
+      cat << 'EOF' >> $jobs
+#!/bin/bash
+trap cleanup EXIT
+cleanup()
+{
+  if [ ! -z "$jobspf" ]; then
+    echo killing "$jobspf"
+    pkill -f "$jobspf"
+  fi
+}
+jobs=$(kubectl get pods --namespace=$1 --selector="service=ambassador" jsonpath='{.items[0].metadata.name}')
+jobspf="kubectl port-forward $pod ${2}:80"
+$jobspf >/dev/null 2>&1 &
+open -n -W "http://127.0.0.1:8000"
+EOF
+chmod +x $notebook
+#$notebook $dev_user >/dev/null 2>&1 &
+$notebook $dev_user &
+      ;;
+    *)
+      echo "unknown argument"
+      exit 1
+      ;;
+  esac
+}
+
+iscomponent()
+{
+  for i in $(echo $COMPONENTS | sed 's/^\[\(.*\)\]$/\1/' | tr '|' ' ');do
+    if [ "$i" == "$1" ]; then
+      echo $i
+      break;
+    fi
+  done
+}
+
+defaultto()
+{
+  local containerized_component
+  case "$#" in
+    0)
+      containerized_component=$(basename $PWD)
+      ;;
+    1)
+      containerized_component=$1
+      shift
+      ;;
+    *)
+      echo "**** too many arguments $@ ****" 
+      exit 1
+      ;;
+  esac
+  iscomponent $containerized_component
+}
+
+statuscommand()
+{
+  while [[ "$#" -gt "0" && $1 =~ ^- ]]; do
+    case "$1" in
+      -h)
+        echo -e 'kf status [-h] [component]\n'\
+        '-h prints help info\n'\
+        'component is one of $COMPONENTS or $(basename $PWD) if not specified\n\n'\
+        '\n'\
+        'status will display status of the remote component and supporting kinds.\n'\
+        'Example: kf status helium-web\n'
+        exit 0
+        ;;
+      *)
+        echo "unknown argument $1"
+        exit 1
+        ;;
+    esac
+  done
+  local containerized_component=$(eval defaultto $*)
+  cmd="kubectl get ${KINDS} -lapp=${containerized_component} --namespace=${dev_user}"
+  ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+}
+
+servecommand()
+{
+  local cmd env=cloud modelcomponent=serveInception 
+  local modelname=inception modelpath="gs://kubeflow-models/inception"
+  case "$#" in 
+    0)
+      echo "modelname required"
+      exit 1
+      ;;
+    *)
+      while [[ "$#" -gt "0" && $1 =~ ^- ]]; do
+        case "$1" in
+          -h)
+            echo -e 'kf train [-h] jobname\n'\
+            '-h prints help info\n'\
+            '\n'\
+            'Train will launch a tf-job using the docker image from the current directory.'
+            exit 1
+            ;;
+          -b)
+            branch=$2
+            shift 2
+            ;;
+          -r)
+            repo=$2
+            shift 2
+            ;;
+          -i)
+            image=$2
+            shift 2
+            ;;
+          *)
+            echo "unknown argument $1"
+            exit 1
+            ;;
+        esac
+      done
+      ;;
+  esac
+  if [ -d .git ]; then
+    grepo=$(git remote -v|grep ^origin|head -1|sed 's/^.*@github.com:\(.*\).git.*$/\1/')
+    if [ "${grepo#*/}" == "kubeflow" ]; then
+      repo=$grepo
+      branch=$(git branch|grep '^*'|awk '{print $2}')
+    fi
+  fi
+  case "$#" in 
+    0)
+      echo "modelname required"
+      exit 1
+      ;;
+    1)
+      modelname=$1
+      cd $HOME/$dev_user
+      pkginstall kubeflow/tf-serving $branch
+      cmd="ks generate tf-serving $modelcomponent --name=$modelname"
+      ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+      cmd="ks param set $modelcomponent namespace ${dev_user}"
+      ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+      cmd="ks param set $modelcomponent modelPath $modelpath"
+      ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+      cmd="ks apply -J ksonnet-lib $env -c $modelcomponent"
+      ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+      ;;
+    *)
+      echo "unknown argument"
+      exit 1
+      ;;
+  esac
+}
+
+traincommand()
+{
+  local jobname cmd env=cloud image=gcr.io/tf-on-k8s-dogfood/tf_sample:d4ef871-dirty-991dde4
+  local grepo repo="kubeflow/kubeflow" branch="master"
+  case "$#" in 
+    0)
+      echo "jobname required"
+      exit 1
+      ;;
+    *)
+      while [[ "$#" -gt "0" && $1 =~ ^- ]]; do
+        case "$1" in
+          -h)
+            echo -e 'kf train [-h] jobname\n'\
+            '-h prints help info\n'\
+            '\n'\
+            'Train will launch a tf-job using the docker image from the current directory.'
+            exit 1
+            ;;
+          -b)
+            branch=$2
+            shift 2
+            ;;
+          -r)
+            repo=$2
+            shift 2
+            ;;
+          -i)
+            image=$2
+            shift 2
+            ;;
+          *)
+            echo "unknown argument $1"
+            exit 1
+            ;;
+        esac
+      done
+      ;;
+  esac
+  if [ -d .git ]; then
+    grepo=$(git remote -v|grep ^origin|head -1|sed 's/^.*@github.com:\(.*\).git.*$/\1/')
+    if [ "${grepo#*/}" == "kubeflow" ]; then
+      repo=$grepo
+      branch=$(git branch|grep '^*'|awk '{print $2}')
+    fi
+  fi
+  case "$#" in 
+    0)
+      echo "jobname required"
+      exit 1
+      ;;
+    1)
+      jobname=$1
+      cd $HOME/$dev_user
+      pkginstall kubeflow/tf-job $branch
+      cmd="ks generate tf-job $jobname --name=$jobname --namespace=$dev_user"
+      ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+      cmd="ks param set $jobname image ${image}"
+      ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+      cmd="ks apply -J ksonnet-lib $env -c $jobname"
+      ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+      ;;
+    *)
+      echo "unknown argument"
+      exit 1
+      ;;
+  esac
+}
+
+usercommand()
+{
+  local project=$(gcloud projects --quiet list|grep -v PROJECT_ID|awk '{print $1}') 
+  local userid add=false delete=false cmd 
+  case "$#" in 
+    0)
+      echo "userid required"
+      exit 1
+      ;;
+    *)
+      while [[ "$#" -gt "0" && $1 =~ ^- ]]; do
+        case "$1" in
+          -h)
+            echo -e 'kf user [-h][-a --add][-d --delete] userid\n'\
+            '-h prints help info\n'\
+            '-a --add will add a user to the cluster identified by <userid>\n'\
+            '-d --delete will remove a user from the cluster identified by <userid>\n'\
+            '\n'\
+            'User subcommand will add or delete a user from the cluster.'
+            exit 1
+            ;;
+          -a | --add)
+            add=true
+            shift 1
+            ;;
+          -d | --delete)
+            delete=true
+            shift 1
+            ;;
+          *)
+            echo "unknown argument $1"
+            exit 1
+            ;;
+        esac
+      done
+      ;;
+  esac
+  case "$#" in 
+    0)
+      echo "userid required"
+      exit 1
+      ;;
+    1)
+      userid=$1
+      ;;
+    *)
+      echo "unknown argument"
+      exit 1
+      ;;
+  esac
+  if [[ $add ]]; then
+    cmd="gcloud projects add-iam-policy-binding $project --role roles/iap.httpsResourceAccessor --member user:$userid"
+    ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+  elif [[ $delete ]]; then
+    cmd="gcloud projects remove-iam-policy-binding $project --role roles/iap.httpsResourceAccessor --member user:$userid"
+    ( $verbose && echo $cmd && eval $cmd  ) || eval $cmd
+  fi
+}
+
+commands () 
+{
+  if [ $# = "0" ]; then
+    usage
+    exit 1
+  fi
+  while :
+  do
+    case "$1" in
+      create)
+        shift 1
+        createcommand $@
+        break;
+        ;;
+      delete)
+        shift 1
+        deletecommand $@
+        break;
+        ;;
+      exec)
+        shift 1
+        execcommand $@
+        break
+        ;;
+      jobs)
+        shift 1
+        jobscommand $@
+        break
+        ;;
+      logs)
+        shift 1
+        logscommand $@
+        break
+        ;;
+      notebook)
+        shift 1
+        notebookcommand $@
+        break
+        ;;
+      serve)
+        shift 1
+        servecommand $@
+        break
+        ;;
+      shell)
+        shift 1
+        shellcommand $@
+        break
+        ;;
+      show)
+        shift 1
+        showcommand $@
+        break
+        ;;
+      status)
+        shift 1
+        statuscommand $@
+        break
+        ;;
+      train)
+        shift 1
+        traincommand $@
+        break
+        ;;
+      user)
+        shift 1
+        usercommand $@
+        break
+        ;;
+      whoami)
+        printnamespace
+        break
+        ;;
+      *)
+        echo "**** unknown argument $1 ****"
+        exit 1
+        break
+        ;;  
+    esac
+  done
+}
+
+if [ "$#" == "0" ]; then
+  usage
+  exit 0
+fi
+
+while :
+do
+  case "$1" in
+    -h | --help)
+	  help
+	  exit 0
+	  ;;
+    -v | --version)
+	  version 
+	  exit 0
+	  ;;
+    -V | --verbose)
+      verbose=true
+      shift
+      ;;
+    --) 
+      shift
+      break
+      ;;
+    -*)
+      echo "Error: Unknown option: $1" >&2
+      exit 1
+      ;;
+    *) 
+      break
+      ;;
+  esac
+done
+if [ -z "$dev_user" ]; then
+  usage
+  exit 1
+fi
+commands $*
