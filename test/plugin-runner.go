@@ -20,7 +20,7 @@ func main() {
 	f := sym.(func())
 
 	// Note that swapping these two lines makes the issue disappear
-	go f()
+	// go f()
 	f()
 
 	time.Sleep(time.Second)

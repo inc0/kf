@@ -1,27 +1,45 @@
 #!/bin/bash
 KF=github.com/kkasravi/kf/kf
-rm -rf $GOPATH/src/$KF
+KFROOT=$(dirname $GOPATH/src/$KF)
+rm -rf $GOPATH/src/$KF $KFROOT/functions/* cmd
 mkdir $GOPATH/src/$KF
+for i in $(kubeless function ls |grep -v '^NAME'|awk '{print $1}');do
+  kubeless function delete $i
+done
+
+add()
+{
+  local name=$1 functionpath=$2 parent templatefile=../templates/python/template.py
+  if [[ $# == 3 ]]; then
+    cobra add $1
+  else 
+    parent=$3
+    cobra add $1 -p ${parent}Cmd
+  fi
+  mkdir $functionpath
+  file=$functionpath/${1}.py
+  cp $templatefile $file
+  cd $functionpath
+  kubeless function deploy $1 --from-file ${1}.py --handler ${1}.handler --runtime python3.6
+  cd -
+}
 
 cobra init $KF
 cd $GOPATH/src/$KF
-cobra add create
-cobra add delete
-cobra add exec
-cobra add logs
-cobra add remove
-cobra add services
-cobra add list -p 'servicesCmd'
-cobra add health -p 'servicesCmd'
-cobra add stats -p 'servicesCmd'
-cobra add shell
-cobra add use
-cobra add whoami
-cobra add user
-cobra add add -p 'userCmd' 
-cobra add rm -p 'userCmd' 
-cobra add ls -p 'userCmd'
-cobra add command
-cd -
+for i in create delete exec logs remove services shell use whoami user command;do
+  add $i ../functions/$i
+done
+for i in list health stats; do
+  add $i ../functions/services/$i services
+done
+for i in add rm ls; do
+  add $i ../functions/user/$i user
+done
+ed -s main.go <<EOF
+%s/kf\/kf\//kf\//
+w
+q
+EOF
+cd $KFROOT 
 mv $GOPATH/src/$KF/* .
-rmdir $GOPATH/src/$KF
+rm -rf $GOPATH/src/$KF
