@@ -3,18 +3,23 @@ KF=github.com/kkasravi/kf/kf
 KFROOT=$(dirname $GOPATH/src/$KF)
 rm -rf $GOPATH/src/$KF $KFROOT/functions/* cmd
 mkdir $GOPATH/src/$KF
-for i in $(kubeless function ls |grep -v '^NAME'|awk '{print $1}');do
-  kubeless function delete $i
-done
+
+remove()
+{
+  for i in $(kubeless function ls |grep -v '^NAME'|awk '{print $1}');do
+    kubeless function delete $i
+  done
+  sleep 5
+}
 
 add()
 {
   local name=$1 functionpath=$2 parent templatefile=../templates/python/template.py
   if [[ $# == 3 ]]; then
-    cobra add $1
-  else 
     parent=$3
     cobra add $1 -p ${parent}Cmd
+  else 
+    cobra add $1
   fi
   mkdir $functionpath
   file=$functionpath/${1}.py
@@ -24,22 +29,31 @@ add()
   cd -
 }
 
+remove
 cobra init $KF
 cd $GOPATH/src/$KF
-for i in create delete exec logs remove services shell use whoami user command;do
+for i in create delete remove run status use whoami command;do
   add $i ../functions/$i
 done
-for i in list health stats; do
-  add $i ../functions/services/$i services
-done
-for i in add rm ls; do
-  add $i ../functions/user/$i user
+for i in list health info; do
+  add $i ../functions/status/$i status
 done
 ed -s main.go <<EOF
 %s/kf\/kf\//kf\//
 w
 q
 EOF
+for i in $(ls cmd/*.go);do
+  grep rootCmd $i >/dev/null
+  if [[ $? == 0 ]]; then
+    ed -s $i <<EOF1
+%s/rootCmd/RootCmd/g
+w
+q
+EOF1
+  fi
+done
+
 cd $KFROOT 
 mv $GOPATH/src/$KF/* .
 rm -rf $GOPATH/src/$KF

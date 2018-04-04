@@ -36,7 +36,7 @@ to quickly create a Cobra application.`,
 }
 
 func init() {
-	Cmd.AddCommand(useCmd)
+	RootCmd.AddCommand(useCmd)
 
 	// Here you will define your flags and configuration settings.
 
