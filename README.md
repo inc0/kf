@@ -1,5 +1,9 @@
 # Client for kubeflow
 
+## Requirements
+
+[Kubeless](http://kubeless.io/) installed
+
 ## Usage
 
 Deploy bootstrap function
