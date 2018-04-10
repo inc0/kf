@@ -1,0 +1,51 @@
+#!/usr/bin/env python
+import json
+import os
+import subprocess
+import click
+
+
+@click.group()
+def cli():
+    pass
+
+@cli.group()
+def env():
+    pass
+
+
+@env.command()
+@click.argument('name')
+def create(name):
+    data = {
+        'namespace': name,
+            }
+    out = subprocess.check_output(["kubeless", "function", "call", "boot", "--data", json.dumps(data)])
+    click.echo(out)
+
+
+@env.command()
+@click.argument('name')
+def delete(name):
+    out = subprocess.check_output(["kubectl", "delete", "ns", "kubeflow-" + name])
+    click.echo(out)
+
+
+@env.command()
+def list():
+    out = subprocess.check_output(["kubectl", "get", "ns"])
+    click.echo(b"".join([l.split(b" ")[0].split(b"-")[1] for l in out.split(b"\n") if b'kubeflow' in l]))
+
+@env.command()
+@click.argument('name')
+def use(name):
+    if not os.path.exists(os.getenv("HOME")+"/.kubeflow/"):
+        os.makedirs(os.getenv("HOME") + "/.kubeflow/")
+    with open(os.getenv("HOME") + "/.kubeflow/env", "w") as f:
+        f.write(name)
+    click.echo("Using environment " + name)
+
+
+
+if __name__ == '__main__':
+    cli()
