@@ -32,7 +32,17 @@ def handler():
     f = __import__(func).handler
     return f(event, function_context)
 
+@app.get('/healthz')
+def healthz():
+    return 'OK'
+
 
 if __name__ == '__main__':
+    import logging
+    import sys
+    import requestlogger
+    loggedapp = requestlogger.WSGILogger(
+        app,
+        [logging.StreamHandler(stream=sys.stdout)], requestlogger.ApacheFormatter())
     bottle.run(app, host='0.0.0.0', port=func_port, debug=True)
 

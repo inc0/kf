@@ -1,0 +1,26 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ namespace }}
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kubeflow-deploy-{{ namespace }}
+  namespace: {{ namespace }}
+spec:
+  template:
+    spec:
+      containers:
+      - name: kubeflow-bootstrap
+        image: inc0/kubeflow-bootstraper
+        env:
+        - name: PVC_MOUNT_PATH
+          value: {{ pvc_path }}  # If StorageClass is available, edit this value like /home/jovyan/work
+        - name: NAMESPACE
+          value: {{ namespace }}
+      restartPolicy: Never
+  backoffLimit: 4
+
