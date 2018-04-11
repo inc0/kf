@@ -1,7 +1,9 @@
 #!/usr/bin/env python
 import json
 import os
+from subprocess import Popen
 import subprocess
+import signal
 import click
 
 
@@ -44,6 +46,16 @@ def use(name):
     with open(os.getenv("HOME") + "/.kubeflow/env", "w") as f:
         f.write(name)
     click.echo("Using environment " + name)
+
+@cli.command()
+def jupyter():
+    with open(os.getenv("HOME") + "/.kubeflow/env", "r") as f:
+        env = f.read()
+    p = Popen(['kubectl', 'port-forward', '-n', 'kubeflow-' + env, 'svc/tf-hub-lb', '8990:80'])
+    click.echo("Listening on 192.168.0.106:8989")
+    signal.signal(signal.SIGINT, lambda sig, frame: p.terminate())
+    signal.pause()
+
 
 
 
