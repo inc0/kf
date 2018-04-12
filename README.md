@@ -2,7 +2,9 @@
 
 ## Requirements
 
-[Kubeless](http://kubeless.io/) installed
+[Kubeless](http://kubeless.io/) installed, including `kubeless` CLI tool available in $PATH
+python click installed - `pip install click`
+Kubectl installed and available in $PATH
 
 ## Usage
 
